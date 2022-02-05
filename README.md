@@ -1,6 +1,14 @@
 # reactiveswift-composable-architecture
 
-A description of this package.
+Installation
+
+Swift Package Manager
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/FullStack-Swift/reactiveswift-composable-architecture", .upToNextMajor(from: "1.0.0"))
+]
+```
 
 ## Combine
 
