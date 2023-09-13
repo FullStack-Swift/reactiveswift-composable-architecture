@@ -1,29 +1,29 @@
-  // https://github.com/CombineCommunity/CombineExt/blob/master/Sources/Operators/Create.swift
+// https://github.com/CombineCommunity/CombineExt/blob/master/Sources/Operators/Create.swift
 
-  // Copyright (c) 2020 Combine Community, and/or Shai Mishali
-  //
-  // Permission is hereby granted, free of charge, to any person obtaining a copy
-  // of this software and associated documentation files (the "Software"), to deal
-  // in the Software without restriction, including without limitation the rights
-  // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-  // copies of the Software, and to permit persons to whom the Software is
-  // furnished to do so, subject to the following conditions:
-  //
-  // The above copyright notice and this permission notice shall be included in
-  // all copies or substantial portions of the Software.
-  //
-  // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-  // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-  // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-  // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-  // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-  // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-  // THE SOFTWARE.
+// Copyright (c) 2020 Combine Community, and/or Shai Mishali
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 
 import Combine
 import Darwin
 
-final class DemandBuffer<S: Subscriber> {
+final class DemandBuffer<S: Subscriber>: @unchecked Sendable {
   private var buffer = [S.Input]()
   private let subscriber: S
   private var completion: Subscribers.Completion<S.Failure>?
@@ -46,11 +46,11 @@ final class DemandBuffer<S: Subscriber> {
       self.completion == nil, "How could a completed publisher sent values?! Beats me 🤷‍♂️")
     
     switch demandState.requested {
-    case .unlimited:
-      return subscriber.receive(value)
-    default:
-      buffer.append(value)
-      return flush()
+      case .unlimited:
+        return subscriber.receive(value)
+      default:
+        buffer.append(value)
+        return flush()
     }
   }
   
@@ -73,7 +73,7 @@ final class DemandBuffer<S: Subscriber> {
         demandState.requested += newDemand
       }
       
-        // If buffer isn't ready for flushing, return immediately
+      // If buffer isn't ready for flushing, return immediately
       guard demandState.requested > 0 || newDemand == Subscribers.Demand.none else { return .none }
       
       while !buffer.isEmpty && demandState.processed < demandState.requested {
@@ -82,7 +82,7 @@ final class DemandBuffer<S: Subscriber> {
       }
       
       if let completion = completion {
-          // Completion event was already sent
+        // Completion event was already sent
         buffer = []
         demandState = .init()
         self.completion = nil
@@ -103,36 +103,55 @@ final class DemandBuffer<S: Subscriber> {
   }
 }
 
+extension Combine.AnyPublisher where Failure == Never {
+  private init(
+    _ callback: @escaping (Effect<Output>.Subscriber) -> Cancellable
+  ) {
+    self = Publishers.Create(callback: callback).eraseToAnyPublisher()
+  }
+  
+  static func create(
+    _ factory: @escaping (Effect<Output>.Subscriber) -> Cancellable
+  ) -> Combine.AnyPublisher<Output, Failure> {
+    Combine.AnyPublisher(factory)
+  }
+}
+
 extension Publishers {
-  fileprivate class Create<Output, Failure: Swift.Error>: Publisher {
-    private let callback: (AnyPublisher<Output, Failure>.Subscriber) -> Cancellable
-    init(callback: @escaping (AnyPublisher<Output, Failure>.Subscriber) -> Cancellable) {
+  fileprivate class Create<Output>: Publisher {
+    typealias Failure = Never
+    
+    private let callback: (Effect<Output>.Subscriber) -> Cancellable
+    
+    init(callback: @escaping (Effect<Output>.Subscriber) -> Cancellable) {
       self.callback = callback
     }
     
-    func receive<S: Subscriber>(subscriber: S) where Failure == S.Failure, Output == S.Input {
+    func receive<S: Subscriber>(subscriber: S) where S.Input == Output, S.Failure == Failure {
       subscriber.receive(subscription: Subscription(callback: callback, downstream: subscriber))
     }
   }
 }
 
 extension Publishers.Create {
-  fileprivate class Subscription<Downstream: Subscriber>: Combine.Subscription
-  where Output == Downstream.Input, Failure == Downstream.Failure {
+  fileprivate final class Subscription<Downstream: Subscriber>: Combine.Subscription
+  where Downstream.Input == Output, Downstream.Failure == Never {
     private let buffer: DemandBuffer<Downstream>
     private var cancellable: Cancellable?
     
     init(
-      callback: @escaping (AnyPublisher<Output, Failure>.Subscriber) -> Cancellable,
+      callback: @escaping (Effect<Output>.Subscriber) -> Cancellable,
       downstream: Downstream
     ) {
       self.buffer = DemandBuffer(subscriber: downstream)
+      
       let cancellable = callback(
         .init(
           send: { [weak self] in _ = self?.buffer.buffer(value: $0) },
           complete: { [weak self] in self?.buffer.complete(completion: $0) }
         )
       )
+      
       self.cancellable = cancellable
     }
     
@@ -148,28 +167,28 @@ extension Publishers.Create {
 
 extension Publishers.Create.Subscription: CustomStringConvertible {
   var description: String {
-    return "Create.Subscription<\(Output.self), \(Failure.self)>"
+    return "Create.Subscription<\(Output.self)>"
   }
 }
 
-extension AnyPublisher {
-  public struct Subscriber {
-    private let _send: (Output) -> Void
-    private let _complete: (Subscribers.Completion<Failure>) -> Void
+extension Effect {
+  struct Subscriber {
+    private let _send: (Action) -> Void
+    private let _complete: (Subscribers.Completion<Never>) -> Void
     
     init(
-      send: @escaping (Output) -> Void,
-      complete: @escaping (Subscribers.Completion<Failure>) -> Void
+      send: @escaping (Action) -> Void,
+      complete: @escaping (Subscribers.Completion<Never>) -> Void
     ) {
       self._send = send
       self._complete = complete
     }
     
-    public func send(_ value: Output) {
+    public func send(_ value: Action) {
       self._send(value)
     }
     
-    public func send(completion: Subscribers.Completion<Failure>) {
+    public func send(completion: Subscribers.Completion<Never>) {
       self._complete(completion)
     }
   }

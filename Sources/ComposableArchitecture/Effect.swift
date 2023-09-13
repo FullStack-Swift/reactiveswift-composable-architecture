@@ -1,355 +1,377 @@
 import Foundation
-import ReactiveSwift
-  /// The ``Effect`` type encapsulates a unit of work that can be run in the outside world, and can
-  /// feed data back to the ``Store``. It is the perfect place to do side effects, such as network
-  /// requests, saving/loading from disk, creating timers, interacting with dependencies, and more.
-  ///
-  /// Effects are returned from reducers so that the ``Store`` can perform the effects after the
-  /// reducer is done running. It is important to note that ``Store`` is not thread safe, and so all
-  /// effects must receive values on the same thread, **and** if the store is being used to drive UI
-  /// then it must receive values on the main thread.
-  ///
-  /// An effect simply wraps a `Publisher` value and provides some convenience initializers for
-  /// constructing some common types of effects.
-public typealias Effect<Value, Error: Swift.Error> = SignalProducer<Value, Error>
+import SwiftUI
+import XCTestDynamicOverlay
 
-extension Effect {
-  
-    /// An effect that does nothing and completes immediately. Useful for situations where you must
-    /// return an effect, but you don't need to do anything.
-  public static var none: Self {
-    .empty
+public struct Effect<Action> {
+  @usableFromInline
+  enum Operation {
+    case none
+    case publisher(EffectAction<Action>)
+    case run(TaskPriority? = nil, @Sendable (_ send: Send<Action>) async -> Void)
   }
   
-    /// Creates an effect that can supply a single value asynchronously in the future.
-    ///
-    /// This can be helpful for converting APIs that are callback-based into ones that deal with
-    /// ``Effect``s.
-    ///
-    /// For example, to create an effect that delivers an integer after waiting a second:
-    ///
-    /// ```swift
-    /// Effect<Int, Never>.future { callback in
-    ///   DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-    ///     callback(.success(42))
-    ///   }
-    /// }
-    /// ```
-    ///
-    /// Note that you can only deliver a single value to the `callback`. If you send more they will be
-    /// discarded:
-    ///
-    /// ```swift
-    /// Effect<Int, Never>.future { callback in
-    ///   DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-    ///     callback(.success(42))
-    ///     callback(.success(1729)) // Will not be emitted by the effect
-    ///   }
-    /// }
-    /// ```
-    ///
-    ///  If you need to deliver more than one value to the effect, you should use the ``Effect``
-    ///  initializer that accepts a ``Subscriber`` value.
-    ///
-    /// - Parameter attemptToFulfill: A closure that takes a `callback` as an argument which can be
-    ///   used to feed it `Result<Output, Failure>` values.
-  public static func future(
-    _ attemptToFulfill: @escaping (@escaping (Result<Value, Error>) -> Void) -> Void
-  ) -> Effect {
-    SignalProducer { observer, _ in
-      attemptToFulfill { result in
-        switch result {
-        case let .success(value):
-          observer.send(value: value)
-          observer.sendCompleted()
-        case let .failure(error):
-          observer.send(error: error)
-        }
-      }
-    }
-  }
+  @usableFromInline
+  let operation: Operation
   
-    /// Initializes an effect that lazily executes some work in the real world and synchronously sends
-    /// that data back into the store.
-    ///
-    /// For example, to load a user from some JSON on the disk, one can wrap that work in an effect:
-    ///
-    /// ```swift
-    /// Effect<User, Error>.result {
-    ///   let fileUrl = URL(
-    ///     fileURLWithPath: NSSearchPathForDirectoriesInDomains(
-    ///       .documentDirectory, .userDomainMask, true
-    ///     )[0]
-    ///   )
-    ///   .appendingPathComponent("user.json")
-    ///
-    ///   let result = Result<User, Error> {
-    ///     let data = try Data(contentsOf: fileUrl)
-    ///     return try JSONDecoder().decode(User.self, from: $0)
-    ///   }
-    ///
-    ///   return result
-    /// }
-    /// ```
-    ///
-    /// - Parameter attemptToFulfill: A closure encapsulating some work to execute in the real world.
-    /// - Returns: An effect.
-  public static func result(_ attemptToFulfill: @escaping () -> Result<Value, Error>) -> Self {
-    return self.init(result: attemptToFulfill())
+  @usableFromInline
+  init(operation: Operation) {
+    self.operation = operation
   }
-    /// Initializes an effect from a callback that can send as many values as it wants, and can send
-    /// a completion.
-    ///
-    /// This initializer is useful for bridging callback APIs, delegate APIs, and manager APIs to the
-    /// ``Effect`` type. One can wrap those APIs in an Effect so that its events are sent through the
-    /// effect, which allows the reducer to handle them.
-    ///
-    /// For example, one can create an effect to ask for access to `MPMediaLibrary`. It can start by
-    /// sending the current status immediately, and then if the current status is `notDetermined` it
-    /// can request authorization, and once a status is received it can send that back to the effect:
-    ///
-    /// ```swift
-    /// Effect.run { subscriber in
-    ///   subscriber.send(MPMediaLibrary.authorizationStatus())
-    ///
-    ///   guard MPMediaLibrary.authorizationStatus() == .notDetermined else {
-    ///     subscriber.send(completion: .finished)
-    ///     return AnyCancellable {}
-    ///   }
-    ///
-    ///   MPMediaLibrary.requestAuthorization { status in
-    ///     subscriber.send(status)
-    ///     subscriber.send(completion: .finished)
-    ///   }
-    ///   return AnyCancellable {
-    ///     // Typically clean up resources that were created here, but this effect doesn't
-    ///     // have any.
-    ///   }
-    /// }
-    /// ```
-    ///
-    /// - Parameter work: A closure that accepts a ``Subscriber`` value and returns a cancellable.
-    ///   When the ``Effect`` is completed, the cancellable will be used to clean up any resources
-    ///   created when the effect was started.
-  public static func run(
-  ) -> Self {
-    fatalError()
-  }
-  
-    /// Concatenates a variadic list of effects together into a single effect, which runs the effects
-    /// one after the other.
-    ///
-    /// - Warning: Combine's `Publishers.Concatenate` operator, which this function uses, can leak
-    ///   when its suffix is a `Publishers.MergeMany` operator, which is used throughout the
-    ///   Composable Architecture in functions like ``Reducer/combine(_:)-1ern2``.
-    ///
-    ///   Feedback filed: <https://gist.github.com/mbrandonw/611c8352e1bd1c22461bd505e320ab58>
-    ///
-    /// - Parameter effects: A variadic list of effects.
-    /// - Returns: A new effect
-  public static func concatenate(_ effects: Effect...) -> Effect {
-    .concatenate(effects)
-  }
-  
-    /// Concatenates a collection of effects together into a single effect, which runs the effects one
-    /// after the other.
-    ///
-    /// - Warning: Combine's `Publishers.Concatenate` operator, which this function uses, can leak
-    ///   when its suffix is a `Publishers.MergeMany` operator, which is used throughout the
-    ///   Composable Architecture in functions like ``Reducer/combine(_:)-1ern2``.
-    ///
-    ///   Feedback filed: <https://gist.github.com/mbrandonw/611c8352e1bd1c22461bd505e320ab58>
-    ///
-    /// - Parameter effects: A collection of effects.
-    /// - Returns: A new effect
-  public static func concatenate<C: Collection>(
-    _ effects: C
-  ) -> Effect where C.Element == Effect {
-    guard let first = effects.first else { return .none }
-    return effects
-      .dropFirst()
-      .reduce(into: first) { effects, effect in
-        effects = effects.concat(effect)
-      }
-  }
-  
-    /// Merges a variadic list of effects together into a single effect, which runs the effects at the
-    /// same time.
-    ///
-    /// - Parameter effects: A list of effects.
-    /// - Returns: A new effect
-  public static func merge(
-    _ effects: Effect...
-  ) -> Effect {
-    .merge(effects)
-  }
-  
-    /// Merges a sequence of effects together into a single effect, which runs the effects at the same
-    /// time.
-    ///
-    /// - Parameter effects: A sequence of effects.
-    /// - Returns: A new effect
-  public static func merge<S: Sequence>(_ effects: S) -> SignalProducer<Value, Error> where S.Element == Effect {
-    return SignalProducer<S.Iterator.Element, Never>(effects).flatten(.merge)
-  }
-  
-    /// Creates an effect that executes some work in the real world that doesn't need to feed data
-    /// back into the store.
-    ///
-    /// - Parameter work: A closure encapsulating some work to execute in the real world.
-    /// - Returns: An effect.
-  public static func fireAndForget(_ work: @escaping () -> Void) -> Effect {
-    .deferred { () -> SignalProducer<Value, Error> in
-      work()
-      return .empty
-    }
-  }
-  public static func deferred(_ createProducer: @escaping () -> SignalProducer<Value, Error>)
-  -> SignalProducer<Value, Error>
-  {
-    Effect<Void, Error>(value: ())
-      .flatMap(.merge, createProducer)
-  }
-  
-    /// Transforms all elements from the upstream effect with a provided closure.
-    ///
-    /// - Parameter transform: A closure that transforms the upstream effect's output to a new output.
-    /// - Returns: A publisher that uses the provided closure to map elements from the upstream effect
-    ///   to new elements that it then publishes.
-    //MARK:   already in SignalProducer
-    //    public func map<T>(_ transform: @escaping (Value) -> T) -> Effect<T, Error> {
-    //      return self.map(transform)
-    //    }
 }
 
-extension Effect where Error == Swift.Error {
-  /// Initializes an effect that lazily executes some work in the real world and synchronously sends
-  /// that data back into the store.
+/// A convenience type alias for referring to an effect of a given reducer's domain.
+///
+/// Instead of specifying the action:
+///
+/// ```swift
+/// let effect: Effect<Feature.Action>
+/// ```
+///
+/// You can specify the reducer:
+///
+/// ```swift
+/// let effect: EffectOf<Feature>
+/// ```
+public typealias EffectOf<R: Reducer> = Effect<R.Action>
+
+// MARK: - Creating Effects
+
+extension Effect {
+  /// An effect that does nothing and completes immediately. Useful for situations where you must
+  /// return an effect, but you don't need to do anything.
+  @inlinable
+  public static var none: Self {
+    Self(operation: .none)
+  }
+  
+  /// Wraps an asynchronous unit of work that can emit actions any number of times in an effect.
   ///
-  /// For example, to load a user from some JSON on the disk, one can wrap that work in an effect:
+  /// For example, if you had an async stream in a dependency client:
   ///
   /// ```swift
-  /// Effect<User, Error>.catching {
-  ///   let fileUrl = URL(
-  ///     fileURLWithPath: NSSearchPathForDirectoriesInDomains(
-  ///       .documentDirectory, .userDomainMask, true
-  ///     )[0]
-  ///   )
-  ///   .appendingPathComponent("user.json")
-  ///
-  ///   let data = try Data(contentsOf: fileUrl)
-  ///   return try JSONDecoder().decode(User.self, from: $0)
+  /// struct EventsClient {
+  ///   var events: () -> AsyncStream<Event>
   /// }
   /// ```
   ///
-  /// - Parameter work: A closure encapsulating some work to execute in the real world.
-  /// - Returns: An effect.
-  public static func catching(_ work: @escaping () throws -> Value) -> Self {
-    .future { $0(Result { try work() }) }
+  /// Then you could attach to it in a `run` effect by using `for await` and sending each action of
+  /// the stream back into the system:
+  ///
+  /// ```swift
+  /// case .startButtonTapped:
+  ///   return .run { send in
+  ///     for await event in self.events() {
+  ///       send(.event(event))
+  ///     }
+  ///   }
+  /// ```
+  ///
+  /// See ``Send`` for more information on how to use the `send` argument passed to `run`'s closure.
+  ///
+  /// The closure provided to ``run(priority:operation:catch:fileID:line:)`` is allowed to
+  /// throw, but any non-cancellation errors thrown will cause a runtime warning when run in the
+  /// simulator or on a device, and will cause a test failure in tests. To catch non-cancellation
+  /// errors use the `catch` trailing closure.
+  ///
+  /// - Parameters:
+  ///   - priority: Priority of the underlying task. If `nil`, the priority will come from
+  ///     `Task.currentPriority`.
+  ///   - operation: The operation to execute.
+  ///   - catch: An error handler, invoked if the operation throws an error other than
+  ///     `CancellationError`.
+  /// - Returns: An effect wrapping the given asynchronous work.
+  public static func run(
+    priority: TaskPriority? = nil,
+    operation: @escaping @Sendable (_ send: Send<Action>) async throws -> Void,
+    catch handler: (@Sendable (_ error: Error, _ send: Send<Action>) async -> Void)? = nil,
+    fileID: StaticString = #fileID,
+    line: UInt = #line
+  ) -> Self {
+    withEscapedDependencies { escaped in
+      Self(
+        operation: .run(priority) { send in
+          await escaped.yield {
+            do {
+              try await operation(send)
+            } catch is CancellationError {
+              return
+            } catch {
+              guard let handler = handler else {
+#if DEBUG
+                var errorDump = ""
+                customDump(error, to: &errorDump, indent: 4)
+                runtimeWarn(
+                    """
+                    An "Effect.run" returned from "\(fileID):\(line)" threw an unhandled error. …
+                    
+                    \(errorDump)
+                    
+                    All non-cancellation errors must be explicitly handled via the "catch" parameter \
+                    on "Effect.run", or via a "do" block.
+                    """
+                )
+#endif
+                return
+              }
+              await handler(error, send)
+            }
+          }
+        }
+      )
+    }
+  }
+  
+  /// Initializes an effect that immediately emits the action passed in.
+  ///
+  /// > Note: We do not recommend using `Effect.send` to share logic. Instead, limit usage to
+  /// > child-parent communication, where a child may want to emit a "delegate" action for a parent
+  /// > to listen to.
+  /// >
+  /// > For more information, see <doc:Performance#Sharing-logic-with-actions>.
+  ///
+  /// - Parameter action: The action that is immediately emitted by the effect.
+  public static func send(_ action: Action) -> Self {
+    Self(operation: .publisher(SignalProducer<Action, Never>(value: action)))
+  }
+  
+  /// Initializes an effect that immediately emits the action passed in.
+  ///
+  /// > Note: We do not recommend using `Effect.send` to share logic. Instead, limit usage to
+  /// > child-parent communication, where a child may want to emit a "delegate" action for a parent
+  /// > to listen to.
+  /// >
+  /// > For more information, see <doc:Performance#Sharing-logic-with-actions>.
+  ///
+  /// - Parameters:
+  ///   - action: The action that is immediately emitted by the effect.
+  ///   - animation: An animation.
+  public static func send(_ action: Action, animation: Animation? = nil) -> Self {
+    .send(action).animation(animation)
   }
 }
 
-extension SignalProducer {
-    /// Turns any publisher into an ``Effect``.
-    ///
-    /// This can be useful for when you perform a chain of publisher transformations in a reducer, and
-    /// you need to convert that publisher to an effect so that you can return it from the reducer:
-    ///
-    /// ```swift
-    /// case .buttonTapped:
-    ///   return fetchUser(id: 1)
-    ///     .filter(\.isAdmin)
-    ///     .eraseToEffect()
-    /// ```
-    ///
-    /// - Returns: An effect that wraps `self`.
-  public func eraseToEffect() -> Self {
-    self
+/// A type that can send actions back into the system when used from
+/// ``Effect/run(priority:operation:catch:fileID:line:)``.
+///
+/// This type implements [`callAsFunction`][callAsFunction] so that you invoke it as a function
+/// rather than calling methods on it:
+///
+/// ```swift
+/// return .run { send in
+///   send(.started)
+///   defer { send(.finished) }
+///   for await event in self.events {
+///     send(.event(event))
+///   }
+/// }
+/// ```
+///
+/// You can also send actions with animation:
+///
+/// ```swift
+/// send(.started, animation: .spring())
+/// defer { send(.finished, animation: .default) }
+/// ```
+///
+/// See ``Effect/run(priority:operation:catch:fileID:line:)`` for more information on how to
+/// use this value to construct effects that can emit any number of times in an asynchronous
+/// context.
+///
+/// [callAsFunction]: https://docs.swift.org/swift-book/ReferenceManual/Declarations.html#ID622
+@MainActor
+public struct Send<Action>: Sendable {
+  let send: @MainActor @Sendable (Action) -> Void
+  
+  public init(send: @escaping @MainActor @Sendable (Action) -> Void) {
+    self.send = send
   }
   
-    /// Turns any publisher into an ``Effect`` that cannot fail by wrapping its output and failure in
-    /// a result.
-    ///
-    /// This can be useful when you are working with a failing API but want to deliver its data to an
-    /// action that handles both success and failure.
-    ///
-    /// ```swift
-    /// case .buttonTapped:
-    ///   return environment.fetchUser(id: 1)
-    ///     .catchToEffect()
-    ///     .map(ProfileAction.userResponse)
-    /// ```
-    ///
-    /// - Returns: An effect that wraps `self`.
-  public func catchToEffect() -> Effect<Result<Value, Error>, Never> {
-    self.map(Result<Value, Error>.success)
-      .flatMapError { Effect<Result<Value, Error>, Never>(value: Result.failure($0)) }
+  /// Sends an action back into the system from an effect.
+  ///
+  /// - Parameter action: An action.
+  public func callAsFunction(_ action: Action) {
+    guard !Task.isCancelled else { return }
+    self.send(action)
   }
   
-    /// Turns any publisher into an ``Effect`` that cannot fail by wrapping its output and failure
-    /// into a result and then applying passed in function to it.
-    ///
-    /// This is a convenience operator for writing ``Effect/catchToEffect()`` followed by a
-    /// ``Effect/map(_:)``.
-    ///
-    /// ```swift
-    /// case .buttonTapped:
-    ///   return environment.fetchUser(id: 1)
-    ///     .catchToEffect(ProfileAction.userResponse)
-    /// ```
-    ///
-    /// - Parameters:
-    ///   - transform: A mapping function that converts `Result<Output,Failure>` to another type.
-    /// - Returns: An effect that wraps `self`.
-  public func catchToEffect<T>(
-    _ transform: @escaping (Result<Value, Error>) -> T
-  ) -> Effect<T, Never> {
-    self
-      .map { transform(.success($0)) }
-      .flatMapError { Effect<T, Never>(value: transform(.failure($0))) }
+  /// Sends an action back into the system from an effect with animation.
+  ///
+  /// - Parameters:
+  ///   - action: An action.
+  ///   - animation: An animation.
+  public func callAsFunction(_ action: Action, animation: Animation?) {
+    callAsFunction(action, transaction: Transaction(animation: animation))
   }
   
-    /// Turns any publisher into an ``Effect`` for any output and failure type by ignoring all output
-    /// and any failure.
-    ///
-    /// This is useful for times you want to fire off an effect but don't want to feed any data back
-    /// into the system. It can automatically promote an effect to your reducer's domain.
-    ///
-    /// ```swift
-    /// case .buttonTapped:
-    ///   return analyticsClient.track("Button Tapped")
-    ///     .fireAndForget()
-    /// ```
-    ///
-    /// - Parameters:
-    ///   - outputType: An output type.
-    ///   - failureType: A failure type.
-    /// - Returns: An effect that never produces output or errors.
-  public func fireAndForget<NewValue, NewError>(
-    outputType: NewValue.Type = NewValue.self,
-    failureType: NewError.Type = NewError.self
-  ) -> Effect<NewValue, NewError> {
-    self.flatMapError { _ in .empty }
-    .flatMap(.latest) { _ in
-    .empty
+  /// Sends an action back into the system from an effect with transaction.
+  ///
+  /// - Parameters:
+  ///   - action: An action.
+  ///   - transaction: A transaction.
+  public func callAsFunction(_ action: Action, transaction: Transaction) {
+    guard !Task.isCancelled else { return }
+    withTransaction(transaction) {
+      self(action)
     }
   }
 }
 
-extension Effect where Self.Error == Never {
+// MARK: - Composing Effects
+
+extension Effect {
+  /// Merges a variadic list of effects together into a single effect, which runs the effects at the
+  /// same time.
+  ///
+  /// - Parameter effects: A variadic list of effects.
+  /// - Returns: A new effect
+  @inlinable
+  public static func merge(_ effects: Self...) -> Self {
+    Self.merge(effects)
+  }
   
-    /// Assigns each element from a observable to a property on an object.
-    ///
-    /// - Parameters:
-    ///   - to: A key path that indicates the property to assign. See Key-Path Expression in The Swift Programming Language to learn how to use key paths to specify a property of an object.
-    ///   - object: The object that contains the property. The subscriber assigns the object’s property every time it receives a new value.
-    /// - Returns: An Disposable instance. Call dispose() on this instance when you no longer want the publisher to automatically assign the property. Deinitializing this instance will also dispose automatic assignment.
-  @discardableResult
-  public func assign<Root>(to keyPath: ReferenceWritableKeyPath<Root, Self.Value>, on object: Root)
-  -> Disposable
-  {
-    self.startWithValues { value in
-      object[keyPath: keyPath] = value
+  /// Merges a sequence of effects together into a single effect, which runs the effects at the same
+  /// time.
+  ///
+  /// - Parameter effects: A sequence of effects.
+  /// - Returns: A new effect
+  @inlinable
+  public static func merge<S: Sequence>(_ effects: S) -> Self where S.Element == Self {
+    effects.reduce(.none) { $0.merge(with: $1) }
+  }
+  
+  /// Merges this effect and another into a single effect that runs both at the same time.
+  ///
+  /// - Parameter other: Another effect.
+  /// - Returns: An effect that runs this effect and the other at the same time.
+  @inlinable
+  public func merge(with other: Self) -> Self {
+    switch (self.operation, other.operation) {
+      case (_, .none):
+        return self
+      case (.none, _):
+        return other
+      case (.publisher, .publisher), (.run, .publisher), (.publisher, .run):
+        return Self(
+          operation: .publisher(
+            .merge(
+              _EffectPublisher(self),
+              _EffectPublisher(other)
+            )
+          )
+        )
+      case let (.run(lhsPriority, lhsOperation), .run(rhsPriority, rhsOperation)):
+        return Self(
+          operation: .run { send in
+            await withTaskGroup(of: Void.self) { group in
+              group.addTask(priority: lhsPriority) {
+                await lhsOperation(send)
+              }
+              group.addTask(priority: rhsPriority) {
+                await rhsOperation(send)
+              }
+            }
+          }
+        )
+    }
+  }
+  
+  /// Concatenates a variadic list of effects together into a single effect, which runs the effects
+  /// one after the other.
+  ///
+  /// - Parameter effects: A variadic list of effects.
+  /// - Returns: A new effect
+  @inlinable
+  public static func concatenate(_ effects: Self...) -> Self {
+    Self.concatenate(effects)
+  }
+  
+  /// Concatenates a collection of effects together into a single effect, which runs the effects one
+  /// after the other.
+  ///
+  /// - Parameter effects: A collection of effects.
+  /// - Returns: A new effect
+  @inlinable
+  public static func concatenate<C: Collection>(_ effects: C) -> Self where C.Element == Self {
+    effects.reduce(.none) { $0.concatenate(with: $1) }
+  }
+  
+  /// Concatenates this effect and another into a single effect that first runs this effect, and
+  /// after it completes or is cancelled, runs the other.
+  ///
+  /// - Parameter other: Another effect.
+  /// - Returns: An effect that runs this effect, and after it completes or is cancelled, runs the
+  ///   other.
+  @inlinable
+  @_disfavoredOverload
+  public func concatenate(with other: Self) -> Self {
+    switch (self.operation, other.operation) {
+      case (_, .none):
+        return self
+      case (.none, _):
+        return other
+      case (.publisher, .publisher), (.run, .publisher), (.publisher, .run):
+        return Self(
+          operation: .publisher(
+            _EffectPublisher(self).producer.concat(_EffectPublisher(other).producer)
+          )
+        )
+      case let (.run(lhsPriority, lhsOperation), .run(rhsPriority, rhsOperation)):
+        return Self(
+          operation: .run { send in
+            if let lhsPriority = lhsPriority {
+              await Task(priority: lhsPriority) { await lhsOperation(send) }.cancellableValue
+            } else {
+              await lhsOperation(send)
+            }
+            if let rhsPriority = rhsPriority {
+              await Task(priority: rhsPriority) { await rhsOperation(send) }.cancellableValue
+            } else {
+              await rhsOperation(send)
+            }
+          }
+        )
+    }
+  }
+  
+  /// Transforms all elements from the upstream effect with a provided closure.
+  ///
+  /// - Parameter transform: A closure that transforms the upstream effect's action to a new action.
+  /// - Returns: A publisher that uses the provided closure to map elements from the upstream effect
+  ///   to new elements that it then publishes.
+  @inlinable
+  public func map<T>(_ transform: @escaping (Action) -> T) -> Effect<T> {
+    switch self.operation {
+      case .none:
+        return .none
+      case let .publisher(publisher):
+        return .init(
+          operation: .publisher(
+            publisher
+              .map(
+                withEscapedDependencies { escaped in
+                  { action in
+                    escaped.yield {
+                      transform(action)
+                    }
+                  }
+                }
+              )
+          )
+        )
+      case let .run(priority, operation):
+        return withEscapedDependencies { escaped in
+            .init(
+              operation: .run(priority) { send in
+                await escaped.yield {
+                  await operation(
+                    Send { action in
+                      send(transform(action))
+                    }
+                  )
+                }
+              }
+            )
+        }
     }
   }
 }
