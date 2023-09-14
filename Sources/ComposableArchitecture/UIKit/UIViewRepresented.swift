@@ -18,4 +18,14 @@ public struct UIViewRepresented<UIViewType>: UIViewRepresentable where UIViewTyp
     self.updateUIView(uiView, context)
   }
 }
+
+extension UIViewController {
+  
+  public func toSwiftUI() -> some View {
+    UIViewRepresented { context in
+      self.view
+    }
+  }
+}
+
 #endif

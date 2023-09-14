@@ -1,4 +1,3 @@
-import Combine
 import SwiftUI
 
 extension Effect {
@@ -59,6 +58,9 @@ extension Effect {
   }
 }
 
+#if canImport(Combine)
+import Combine
+
 private struct TransactionPublisher<Upstream: Publisher>: Publisher {
   typealias Output = Upstream.Output
   typealias Failure = Upstream.Failure
@@ -99,3 +101,4 @@ private struct TransactionPublisher<Upstream: Publisher>: Publisher {
     }
   }
 }
+#endif

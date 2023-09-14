@@ -186,6 +186,30 @@ public final class ViewStore<ViewState, ViewAction>: ObservableObject {
     self.$_state.value[keyPath: keyPath]
   }
   
+  /// makeBindingTarget
+  /// binding view to viewstore
+  /// ```swiftt
+  /// disposables += viewStore.action <~ buttonLogout.reactive.controlEvents(.touchUpInside).map {_ in ViewAction.logout}
+  /// ```
+  public func makeBindingTarget<U>(_ action: @escaping (ViewStore, U) -> Void) -> BindingTarget<U> {
+    return BindingTarget(on: UIScheduler(), lifetime: lifetime) { [weak self] value in
+      if let self = self {
+        action(self, value)
+      }
+    }
+  }
+  
+  /// binding action
+  /// binding view to viewstore
+  /// ```swiftt
+  /// disposables += viewStore.action <~ buttonLogout.reactive.controlEvents(.touchUpInside).map {_ in ViewAction.logout}
+  /// ```
+  public var action: BindingTarget<ViewAction> {
+    makeBindingTarget {
+      $0.send($1)
+    }
+  }
+  
   /// Sends an action to the store.
   ///
   /// This method returns a ``StoreTask``, which represents the lifecycle of the effect started
